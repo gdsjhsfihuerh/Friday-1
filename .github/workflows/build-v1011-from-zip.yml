@@ -1,0 +1,146 @@
+name: Build FRIDAY v10.11 from uploaded ZIP
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Locate and extract FRIDAY source ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP_FILE="$(find . -maxdepth 1 -type f -name 'FRIDAY_NEXUS_v10.11.0_GITHUB_APK_BUILD_READY_20260722.zip' -print -quit)"
+          if [ -z "$ZIP_FILE" ]; then
+            echo "Required FRIDAY v10.11 build ZIP was not found in the repository root."
+            exit 1
+          fi
+          rm -rf source
+          mkdir -p source
+          unzip -q "$ZIP_FILE" -d source
+          test -f source/settings.gradle.kts
+          test -f source/app/build.gradle.kts
+          test -f source/gradle/wrapper/gradle-wrapper.jar
+          test -f source/tools/run_v1011_regression_tests.sh
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+          cache-dependency-path: source/**/*.gradle*
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install reference-service test dependencies
+        working-directory: source
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt -r mark_server/requirements.txt
+
+      - name: Run Python tests
+        working-directory: source
+        run: python -m pytest -q
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 35
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager             "platform-tools"             "platforms;android-35"             "build-tools;35.0.0"
+
+      - name: Set up Gradle cache
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Make validation scripts executable
+        working-directory: source
+        run: |
+          chmod +x gradlew
+          find tools -maxdepth 1 -type f -name '*.sh' -exec chmod +x {} +
+
+      - name: Static, security, migration, and focused validation
+        working-directory: source
+        run: |
+          set -euo pipefail
+          python3 tools/validate_project.py
+          python3 tools/validate_secure_online_brain.py
+          python3 tools/kotlin_syntax_sanity.py
+          python3 tools/verify_build_order.py
+          python3 tools/test_room_migration_v4_v5.py
+          python3 tools/test_room_migration_v5_v9.py
+          python3 tools/test_room_migration_v9_v10.py
+          python3 tools/test_room_migration_v10_v11.py
+          python3 tools/test_room_migration_v11_v12.py
+          bash tools/run_release_candidate_validation.sh
+          bash tools/run_v1011_regression_tests.sh
+          bash tools/compile_release_candidate_tests.sh
+          bash tools/compile_pure_kotlin_tests.sh
+          bash tools/compile_gateway_client_with_stubs.sh
+          bash tools/compile_local_brain_installer_with_stubs.sh
+          bash tools/compile_local_model_runtime_with_stubs.sh
+          bash tools/compile_device_tool_with_stubs.sh
+
+      - name: Verify Gradle environment
+        working-directory: source
+        run: ./gradlew --version --no-daemon
+
+      - name: Gradle clean
+        working-directory: source
+        run: ./gradlew clean --no-daemon --stacktrace
+
+      - name: Build debug APK
+        working-directory: source
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Run Android lint
+        working-directory: source
+        run: ./gradlew lintDebug --no-daemon --stacktrace
+
+      - name: Run Android unit tests
+        working-directory: source
+        run: ./gradlew testDebugUnitTest --no-daemon --stacktrace
+
+      - name: Run full Gradle checks
+        working-directory: source
+        run: ./gradlew check --no-daemon --stacktrace
+
+      - name: Verify APK output
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="source/app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+          unzip -t "$APK" >/dev/null
+          sha256sum "$APK" | tee "$APK.sha256"
+          apksigner verify --verbose --print-certs "$APK" | tee "$APK.signature.txt"
+          ls -lh "$APK" "$APK.sha256" "$APK.signature.txt"
+
+      - name: Upload APK, checksum, signature, and reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: FRIDAY-NEXUS-v10.11.0-GEMMA-OFFLINE-APK
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            source/app/build/outputs/apk/debug/app-debug.apk
+            source/app/build/outputs/apk/debug/app-debug.apk.sha256
+            source/app/build/outputs/apk/debug/app-debug.apk.signature.txt
+            source/app/build/reports/lint-results-debug.html
+            source/app/build/reports/tests/testDebugUnitTest/
+            
