@@ -156,7 +156,22 @@ jobs:
           test -s "$APK"
           unzip -t "$APK" >/dev/null
           sha256sum "$APK" | tee "$APK.sha256"
-          apksigner verify --verbose --print-certs "$APK" | tee "$APK.signature.txt"
+
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          APKSIGNER="$SDK_ROOT/build-tools/35.0.0/apksigner"
+
+          if [ ! -x "$APKSIGNER" ]; then
+            APKSIGNER="$(find "$SDK_ROOT/build-tools" -type f -name apksigner -perm -111 2>/dev/null | sort -V | tail -n 1)"
+          fi
+
+          if [ -z "${APKSIGNER:-}" ] || [ ! -x "$APKSIGNER" ]; then
+            echo "::error::apksigner was not found under Android SDK build-tools."
+            find "$SDK_ROOT/build-tools" -maxdepth 2 -type f -name 'apksigner*' -print || true
+            exit 1
+          fi
+
+          echo "Using apksigner: $APKSIGNER"
+          "$APKSIGNER" verify --verbose --print-certs "$APK" | tee "$APK.signature.txt"
           ls -lh "$APK" "$APK.sha256" "$APK.signature.txt"
 
       - name: Upload APK and reports
